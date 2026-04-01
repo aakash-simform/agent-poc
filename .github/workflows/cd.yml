@@ -1,4 +1,14 @@
-name: CD — Azure App Service
+# ─────────────────────────────────────────────────────────────────────────────
+# CD — Production Deployment
+# Purpose : Build Docker image, push to Azure Container Registry (presaletool),
+#           scan the image, generate SBOM, and deploy to Azure App Service
+#           (agent-poc) as a Linux container. Sends Teams notification on
+#           success or failure.
+# Triggers: push → main | workflow_dispatch (manual)
+# Auth     : OIDC (no stored Azure credentials)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CD — Deploy to Production
 
 on:
   push:
@@ -7,104 +17,152 @@ on:
       - "**.py"
       - "requirements.txt"
       - "Dockerfile"
-      - ".github/workflows/cd.yml"
   workflow_dispatch:
-    inputs:
-      environment:
-        description: "Target environment"
-        required: true
-        default: "production"
-        type: choice
-        options:
-          - production
 
 permissions:
-  id-token: write
+  id-token: write    # OIDC token
   contents: read
+  packages: write
 
 concurrency:
-  group: cd-${{ github.ref }}
-  cancel-in-progress: false
+  group: production-deploy
+  cancel-in-progress: false  # never cancel an in-flight production deploy
 
 env:
-  PYTHON_VERSION: "3.12"
-  APP_NAME_PROD:    ${{ vars.APP_NAME_PROD }}
-  RESOURCE_GROUP:   ${{ vars.AZURE_RESOURCE_GROUP }}
+  ACR_LOGIN_SERVER: presaletool.azurecr.io
+  IMAGE_NAME: agent-poc
+  APP_SERVICE_NAME: agent-poc
+  RESOURCE_GROUP: agent-poc
 
 jobs:
-  build:
-    name: Build
+  # ── 1. Build, Scan & Push ─────────────────────────────────────────────────
+  build-and-push:
+    name: Build → Scan → Push (ACR)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.image-tag }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-
-      - name: Install dependencies into target folder
-        run: pip install --target=".python_packages/lib/site-packages" -r requirements.txt
-
-      - name: Zip deployment package
-        run: zip -r app.zip . --exclude ".git/*" --exclude ".github/*" --exclude "__pycache__/*" --exclude "*.pyc"
-
-      - name: Upload app artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-package
-          path: app.zip
-          retention-days: 7
-
-  deploy-prod:
-    name: Deploy → Production
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: build
-
-    environment:
-      name: production
-      url: https://${{ env.APP_NAME_PROD }}.azurewebsites.net/ping
-
-    steps:
-      - name: Download app artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: app-package
-
-      - name: Azure Login (OIDC)
+      # ── Azure OIDC Login ─────────────────────────────────────────────────
+      - name: Login to Azure (OIDC)
         uses: azure/login@v2
         with:
-          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Configure App Service — Python runtime
-        uses: azure/cli@v2
-        with:
-          inlineScript: |
-            az webapp config set \
-              --resource-group "${{ env.RESOURCE_GROUP }}" \
-              --name "${{ env.APP_NAME_PROD }}" \
-              --linux-fx-version "PYTHON|3.12" \
-              --startup-file "python app.py"
+      # ── ACR Login (uses OIDC identity — no admin credentials) ────────────
+      - name: Login to Azure Container Registry
+        run: az acr login --name presaletool
 
-      - name: Deploy to Production
+      # ── Image metadata ───────────────────────────────────────────────────
+      - name: Compute image tag
+        id: meta
+        run: |
+          SHORT_SHA=${GITHUB_SHA::8}
+          echo "image-tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_FULL=${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest" >> "$GITHUB_ENV"
+
+      # ── Docker build ─────────────────────────────────────────────────────
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: |
+            ${{ env.IMAGE_FULL }}
+            ${{ env.IMAGE_LATEST }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Trivy vulnerability scan (fail on CRITICAL/HIGH) ─────────────────
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_FULL }}
+          format: "table"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+
+      # ── SBOM generation ─────────────────────────────────────────────────
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0.18.0
+        with:
+          image: ${{ env.IMAGE_FULL }}
+          artifact-name: sbom-${{ github.sha }}.spdx.json
+
+      # ── Push to ACR ──────────────────────────────────────────────────────
+      - name: Push image to ACR
+        run: |
+          docker push ${{ env.IMAGE_FULL }}
+          docker push ${{ env.IMAGE_LATEST }}
+
+  # ── 2. Deploy to Azure App Service ───────────────────────────────────────
+  deploy:
+    name: Deploy → App Service (Production)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-and-push
+    environment: production
+
+    steps:
+      - name: Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy container to Azure App Service
         uses: azure/webapps-deploy@v3
         with:
-          app-name: ${{ env.APP_NAME_PROD }}
-          package: app.zip
+          app-name: ${{ env.APP_SERVICE_NAME }}
+          resource-group-name: ${{ env.RESOURCE_GROUP }}
+          images: ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image-tag }}
 
-      - name: Verify production health
+      - name: Verify deployment health
         run: |
-          echo "Waiting for app to restart..."
-          sleep 20
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://${{ env.APP_NAME_PROD }}.azurewebsites.net/ping")
-          if [ "$STATUS" != "200" ]; then
-            echo "Production health check failed — HTTP $STATUS"
+          sleep 15
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://${{ env.APP_SERVICE_NAME }}.azurewebsites.net/ping)
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ Health check failed — /ping returned HTTP $HTTP_CODE"
             exit 1
           fi
-          echo "Production is healthy — HTTP $STATUS"
+          echo "✅ Health check passed (HTTP $HTTP_CODE)"
+
+  # ── 3. Teams Notification ─────────────────────────────────────────────────
+  notify:
+    name: Teams Notification
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [build-and-push, deploy]
+
+    steps:
+      - name: Teams Notification — Success
+        if: needs.deploy.result == 'success'
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }}
+          ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          notification-summary: "✅ agent-poc deployed successfully to Production — ${{ github.ref_name }} (${{ github.sha }})"
+          notification-color: "28a745"
+          timezone: "UTC"
+
+      - name: Teams Notification — Failure
+        if: needs.build-and-push.result == 'failure' || needs.deploy.result == 'failure'
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }}
+          ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          notification-summary: "❌ agent-poc deployment FAILED — ${{ github.ref_name }} (${{ github.sha }}) — check pipeline logs immediately"
+          notification-color: "dc3545"
+          timezone: "UTC"
