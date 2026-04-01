@@ -13,6 +13,10 @@ name: CD — Deploy to Production
 on:
   push:
     branches: [main]
+    paths:
+      - "**.py"
+      - "requirements.txt"
+      - "Dockerfile"
   workflow_dispatch:
 
 permissions:
@@ -80,7 +84,7 @@ jobs:
 
       # ── Trivy vulnerability scan (fail on CRITICAL/HIGH) ─────────────────
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@v0.30.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ env.IMAGE_FULL }}
           format: "table"
@@ -161,4 +165,4 @@ jobs:
           ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK_URL }}
           notification-summary: "❌ agent-poc deployment FAILED — ${{ github.ref_name }} (${{ github.sha }}) — check pipeline logs immediately"
           notification-color: "dc3545"
-          timezone: "UTC"
+          timezone: "IST"
