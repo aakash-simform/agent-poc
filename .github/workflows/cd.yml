@@ -13,10 +13,6 @@ name: CD — Deploy to Production
 on:
   push:
     branches: [main]
-    paths:
-      - "**.py"
-      - "requirements.txt"
-      - "Dockerfile"
   workflow_dispatch:
 
 permissions:
@@ -84,7 +80,7 @@ jobs:
 
       # ── Trivy vulnerability scan (fail on CRITICAL/HIGH) ─────────────────
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.30.0
         with:
           image-ref: ${{ env.IMAGE_FULL }}
           format: "table"
