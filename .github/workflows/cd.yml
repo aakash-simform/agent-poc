@@ -13,10 +13,6 @@ name: CD — Deploy to Production
 on:
   push:
     branches: [main]
-    paths:
-      - "**.py"
-      - "requirements.txt"
-      - "Dockerfile"
   workflow_dispatch:
 
 permissions:
