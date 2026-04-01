@@ -13,28 +13,25 @@ on:
       environment:
         description: "Target environment"
         required: true
-        default: "staging"
+        default: "production"
         type: choice
         options:
           - production
 
 permissions:
-  id-token: write   # required for OIDC federation
+  id-token: write
   contents: read
 
 concurrency:
   group: cd-${{ github.ref }}
-  cancel-in-progress: false  # never cancel in-flight deployments
+  cancel-in-progress: false
 
 env:
   PYTHON_VERSION: "3.12"
-  APP_NAME_PROD:    ${{ vars.APP_NAME_PROD }}        # e.g. my-flask-app
-  RESOURCE_GROUP:   ${{ vars.AZURE_RESOURCE_GROUP }} # e.g. rg-my-app
+  APP_NAME_PROD:    ${{ vars.APP_NAME_PROD }}
+  RESOURCE_GROUP:   ${{ vars.AZURE_RESOURCE_GROUP }}
 
 jobs:
-  # ──────────────────────────────────────────────
-  # Build artifact
-  # ──────────────────────────────────────────────
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -57,26 +54,25 @@ jobs:
       - name: Upload app artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-package-${{ github.sha }}
+          name: app-package
           path: app.zip
           retention-days: 7
 
-  # ──────────────────────────────────────────────
-  # Deploy to Production (manual approval gate)
-  # ──────────────────────────────────────────────
   deploy-prod:
     name: Deploy → Production
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: build
+
     environment:
-      name: production           # configure approval reviewers in GitHub Environments
+      name: production
       url: https://${{ env.APP_NAME_PROD }}.azurewebsites.net/ping
 
     steps:
       - name: Download app artifact
         uses: actions/download-artifact@v4
         with:
-          name: app-package-${{ github.sha }}
+          name: app-package
 
       - name: Azure Login (OIDC)
         uses: azure/login@v2
@@ -85,8 +81,6 @@ jobs:
           tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # Basic Plan does not support deployment slots — direct zip deploy.
-      # Upgrade to Standard (S1+) to enable slot-swap (zero-downtime) strategy.
       - name: Configure App Service — Python runtime
         uses: azure/cli@v2
         with:
@@ -101,7 +95,7 @@ jobs:
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.APP_NAME_PROD }}
-          package:  app.zip
+          package: app.zip
 
       - name: Verify production health
         run: |
@@ -110,7 +104,7 @@ jobs:
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             "https://${{ env.APP_NAME_PROD }}.azurewebsites.net/ping")
           if [ "$STATUS" != "200" ]; then
-            echo "❌ Production health check failed — HTTP $STATUS"
+            echo "Production health check failed — HTTP $STATUS"
             exit 1
           fi
-          echo "✅ Production is healthy — HTTP $STATUS"
+          echo "Production is healthy — HTTP $STATUS"
