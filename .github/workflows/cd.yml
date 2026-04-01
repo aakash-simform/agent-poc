@@ -121,16 +121,26 @@ jobs:
           resource-group-name: ${{ env.RESOURCE_GROUP }}
           images: ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image-tag }}
 
+      - name: Fetch App Service URL
+        id: app-url
+        run: |
+          HOSTNAME=$(az webapp show \
+            --name ${{ env.APP_SERVICE_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query defaultHostName -o tsv)
+          echo "url=https://${HOSTNAME}" >> "$GITHUB_OUTPUT"
+
       - name: Verify deployment health
         run: |
           sleep 15
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            https://${{ env.APP_SERVICE_NAME }}.azurewebsites.net/ping)
+            ${{ steps.app-url.outputs.url }}/ping)
           if [ "$HTTP_CODE" != "200" ]; then
             echo "❌ Health check failed — /ping returned HTTP $HTTP_CODE"
             exit 1
           fi
           echo "✅ Health check passed (HTTP $HTTP_CODE)"
+          echo "✅ Deployed at: ${{ steps.app-url.outputs.url }}"
 
   # ── 3. Teams Notification ─────────────────────────────────────────────────
   notify:
@@ -149,7 +159,7 @@ jobs:
           ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK_URL }}
           notification-summary: "✅ agent-poc deployed successfully to Production — ${{ github.ref_name }} (${{ github.sha }})"
           notification-color: "28a745"
-          timezone: "UTC"
+          timezone: "Asia/Kolkata"
 
       - name: Teams Notification — Failure
         if: needs.build-and-push.result == 'failure' || needs.deploy.result == 'failure'
@@ -159,4 +169,4 @@ jobs:
           ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK_URL }}
           notification-summary: "❌ agent-poc deployment FAILED — ${{ github.ref_name }} (${{ github.sha }}) — check pipeline logs immediately"
           notification-color: "dc3545"
-          timezone: "IST"
+          timezone: "Asia/Kolkata"
