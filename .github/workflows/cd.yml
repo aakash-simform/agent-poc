@@ -75,8 +75,6 @@ jobs:
           tags: |
             ${{ env.IMAGE_FULL }}
             ${{ env.IMAGE_LATEST }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       # ── Trivy vulnerability scan (fail on CRITICAL/HIGH) ─────────────────
       - name: Scan image with Trivy
